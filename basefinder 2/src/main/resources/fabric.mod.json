@@ -1,0 +1,21 @@
+{
+	"schemaVersion": 1,
+	"id": "basefinder",
+	"version": "${version}",
+	"name": "Base Finder",
+	"description": "Client-side scanner that clusters loaded chests, hoppers and spawners into likely stashes and farms, then highlights them in the world.",
+	"authors": [],
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"com.basefinder.BaseFinderClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
