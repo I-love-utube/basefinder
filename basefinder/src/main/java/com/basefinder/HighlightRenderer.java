@@ -6,16 +6,16 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalDouble;
 
-import com.mojang.blaze3d.PrimitiveTopology;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderTarget;
-import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
-import com.mojang.blaze3d.vertex.VertexFormat;
+// 26.3 moved the render API from com.mojang.blaze3d to com.mojang.renderpearl.
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.renderpearl.api.vertex.VertexFormat;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
@@ -256,14 +256,20 @@ public final class HighlightRenderer {
 		GpuTextureView colorTexture = mainTarget.getColorTextureView();
 		assert colorTexture != null;
 
-		try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder().createRenderPass(
+		// 26.3: RenderPass is now an interface in renderpearl, and setPipeline takes a compiled pipeline.
+		// "var" avoids naming the pass type.
+		try (var pass = RenderSystem.getDevice().createCommandEncoder().createRenderPass(
 				() -> BaseFinderClient.MOD_ID + " highlights", colorTexture, Optional.empty(),
 				mainTarget.getDepthTextureView(), OptionalDouble.empty())) {
-			pass.setPipeline(pipeline);
+			pass.setPipeline(RenderSystem.getCompiledPipeline(pipeline));
 			RenderSystem.bindDefaultUniforms(pass);
 			pass.setUniform("DynamicTransforms", dynamicTransforms);
 			pass.setVertexBuffer(0, info.vertexBuffer().slice());
-			pass.setIndexBuffer(info.indexBuffer(), info.indexType());
+			// ExecuteInfo#indexBuffer was renamed customIndexBuffer in 26.3.
+			var customIndexBuffer = info.customIndexBuffer();
+			if (customIndexBuffer != null) {
+				pass.setIndexBuffer(customIndexBuffer, info.indexType());
+			}
 			pass.drawIndexed(info.indexCount(), 1, info.firstIndex(), info.baseVertex(), 0);
 		}
 	}
