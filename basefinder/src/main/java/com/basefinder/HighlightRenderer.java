@@ -3,66 +3,28 @@ package com.basefinder;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Optional;
-import java.util.OptionalDouble;
 
-import com.mojang.blaze3d.pipeline.RenderTarget;
-import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.vertex.PoseStack;
-import com.mojang.blaze3d.vertex.VertexConsumer;
-// 26.3 moved the render API from com.mojang.blaze3d to com.mojang.renderpearl.
-import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
-import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
-import com.mojang.renderpearl.api.pipeline.RenderPipeline;
-import com.mojang.renderpearl.api.textures.GpuTextureView;
-import com.mojang.renderpearl.api.vertex.VertexFormat;
-import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext;
-import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionEvents;
-import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.RenderPipelines;
-import net.minecraft.client.renderer.StagedVertexBuffer;
-import net.minecraft.client.renderer.rendertype.RenderType;
-import net.minecraft.resources.Identifier;
-import net.minecraft.world.phys.Vec3;
-import org.joml.Matrix4f;
-import org.joml.Matrix4fc;
-import org.joml.Vector3f;
-import org.joml.Vector4f;
+import net.minecraft.gizmos.GizmoStyle;
+import net.minecraft.gizmos.Gizmos;
+import net.minecraft.world.phys.AABB;
 
 /**
- * Draws translucent boxes with bright edge bars around clusters, visible through walls.
- *
- * <p>Follows the structure of Fabric's "Rendering in the World" reference example (custom filled-box
- * pipeline with the depth test removed, extraction phase then drawing phase). Outlines are built from
- * 12 thin filled boxes per cluster, so only the documented filled-box pipeline is needed.
+ * Outlines clusters using Minecraft's built-in gizmo system with "always on top", so the outlines
+ * show through walls. Gizmos are drawn by the game's own render pass, which means this mod never opens
+ * a render pass or touches GPU buffers itself (26.3 keeps the level render pass open during mod events,
+ * so doing that crashed with "Close the existing render pass before performing additional commands").
  */
 public final class HighlightRenderer {
-	private static final RenderPipeline THROUGH_WALLS = RenderPipelines.register(
-			RenderPipeline.builder(RenderPipelines.DEBUG_FILLED_SNIPPET)
-					.withLocation(Identifier.fromNamespaceAndPath(BaseFinderClient.MOD_ID, "pipeline/highlight_through_walls"))
-					.withDepthStencilState(Optional.empty())
-					.build());
-
-	private static final Vector4f COLOR_MODULATOR = new Vector4f(1f, 1f, 1f, 1f);
-	private static final Vector3f MODEL_OFFSET = new Vector3f();
-	private static final Matrix4f TEXTURE_MATRIX = new Matrix4f();
-	private static final StagedVertexBuffer BUFFER =
-			new StagedVertexBuffer(() -> "BaseFinder Highlights", RenderType.SMALL_BUFFER_SIZE);
-
-	private static final float FILL_ALPHA = 0.10f;
-	private static final float EDGE_ALPHA = 0.95f;
-	private static final float EDGE_THICKNESS = 0.06f;
-	private static final float PAD = 0.15f;
+	private static final double PAD = 0.1;
 	private static final int MAX_INDIVIDUAL_BLOCKS = 600;
 
-	/** Immutable render state: built during extraction, read during drawing. */
-	private record BoxState(float x0, float y0, float z0, float x1, float y1, float z1,
-							float r, float g, float b, float a) {
+	/** Immutable draw state: a world-space box and an ARGB color. */
+	private record Box(AABB aabb, int argb) {
 	}
 
-	private static volatile List<BoxState> boxes = List.of();
+	private static volatile List<Box> boxes = List.of();
 	private static long lastKey = Long.MIN_VALUE;
 	private static int frames;
 
@@ -70,26 +32,29 @@ public final class HighlightRenderer {
 	}
 
 	public static void register() {
-		LevelExtractionEvents.END_EXTRACTION.register(HighlightRenderer::extract);
-		LevelRenderEvents.AFTER_TRANSLUCENT_TERRAIN.register(HighlightRenderer::draw);
+		LevelRenderEvents.BEFORE_GIZMOS.register(context -> draw());
 	}
 
+	/** Nothing to release any more; kept so the entrypoint does not need to change. */
 	public static void close() {
-		BUFFER.close();
 	}
 
-	// ---- extraction phase -------------------------------------------------------------------
-
-	private static void extract(LevelExtractionContext context) {
+	private static void draw() {
 		Minecraft mc = Minecraft.getInstance();
 		Config cfg = Config.get();
 		if (!cfg.enabled || mc.player == null || mc.level == null) {
-			boxes = List.of();
-			lastKey = Long.MIN_VALUE;
 			return;
 		}
 
-		// Rebuild when something changed, and at least every 30 frames so "nearest N" follows the player.
+		rebuildIfNeeded(mc, cfg);
+
+		for (Box b : boxes) {
+			Gizmos.cuboid(b.aabb(), GizmoStyle.stroke(b.argb())).setAlwaysOnTop();
+		}
+	}
+
+	/** Rebuilds the box list when data changed, and every 30 frames so "nearest N" follows the player. */
+	private static void rebuildIfNeeded(Minecraft mc, Config cfg) {
 		long key = Store.version * 31 + Tracker.VERSION.get() * 17 + Config.version;
 		if (key == lastKey && ++frames % 30 != 0) {
 			return;
@@ -112,10 +77,12 @@ public final class HighlightRenderer {
 			visible = new ArrayList<>(visible.subList(0, cfg.maxRenderedClusters));
 		}
 
-		List<BoxState> out = new ArrayList<>();
+		List<Box> out = new ArrayList<>();
 		for (Cluster c : visible) {
-			int rgb = cfg.color(c.dominant());
-			addCluster(out, c, rgb);
+			out.add(new Box(new AABB(
+					c.minX - PAD, c.minY - PAD, c.minZ - PAD,
+					c.maxX + 1 + PAD, c.maxY + 1 + PAD, c.maxZ + 1 + PAD),
+					argb(cfg.color(c.dominant()), 0xFF)));
 		}
 
 		if (cfg.markIndividualBlocks) {
@@ -129,9 +96,9 @@ public final class HighlightRenderer {
 				}
 				for (Cluster c : visible) {
 					if (contains(c, h)) {
-						float[] rgb = rgb(cfg.color(h.category()));
-						out.add(new BoxState(h.x() - 0.04f, h.y() - 0.04f, h.z() - 0.04f,
-								h.x() + 1.04f, h.y() + 1.04f, h.z() + 1.04f, rgb[0], rgb[1], rgb[2], 0.35f));
+						out.add(new Box(new AABB(h.x() - 0.02, h.y() - 0.02, h.z() - 0.02,
+								h.x() + 1.02, h.y() + 1.02, h.z() + 1.02),
+								argb(cfg.color(h.category()), 0xB0)));
 						budget--;
 						break;
 					}
@@ -147,130 +114,7 @@ public final class HighlightRenderer {
 				&& h.z() >= c.minZ && h.z() <= c.maxZ;
 	}
 
-	private static float[] rgb(int rgb) {
-		return new float[] {((rgb >> 16) & 0xFF) / 255f, ((rgb >> 8) & 0xFF) / 255f, (rgb & 0xFF) / 255f};
-	}
-
-	private static void addCluster(List<BoxState> out, Cluster c, int color) {
-		float[] col = rgb(color);
-		float r = col[0], g = col[1], b = col[2];
-		float x0 = c.minX - PAD, y0 = c.minY - PAD, z0 = c.minZ - PAD;
-		float x1 = c.maxX + 1 + PAD, y1 = c.maxY + 1 + PAD, z1 = c.maxZ + 1 + PAD;
-		float t = EDGE_THICKNESS;
-
-		out.add(new BoxState(x0, y0, z0, x1, y1, z1, r, g, b, FILL_ALPHA));
-
-		// 4 edges along X, 4 along Y, 4 along Z.
-		for (float y : new float[] {y0, y1}) {
-			for (float z : new float[] {z0, z1}) {
-				out.add(new BoxState(x0, y - t, z - t, x1, y + t, z + t, r, g, b, EDGE_ALPHA));
-			}
-		}
-		for (float x : new float[] {x0, x1}) {
-			for (float z : new float[] {z0, z1}) {
-				out.add(new BoxState(x - t, y0, z - t, x + t, y1, z + t, r, g, b, EDGE_ALPHA));
-			}
-		}
-		for (float x : new float[] {x0, x1}) {
-			for (float y : new float[] {y0, y1}) {
-				out.add(new BoxState(x - t, y - t, z0, x + t, y + t, z1, r, g, b, EDGE_ALPHA));
-			}
-		}
-	}
-
-	// ---- drawing phase ----------------------------------------------------------------------
-
-	private static void draw(LevelRenderContext context) {
-		List<BoxState> list = boxes;
-		if (list.isEmpty()) {
-			return;
-		}
-
-		RenderPipeline pipeline = THROUGH_WALLS;
-		VertexFormat formatBinding = pipeline.getVertexFormatBinding(0);
-		assert formatBinding != null;
-
-		PrimitiveTopology primitive = pipeline.getPrimitiveTopology();
-		StagedVertexBuffer.Draw draw = BUFFER.appendDraw(formatBinding, primitive,
-				primitive == PrimitiveTopology.QUADS ? RenderSystem.getProjectionType().vertexSorting() : null);
-
-		PoseStack matrices = context.poseStack();
-		Vec3 camera = context.levelState().cameraRenderState.pos;
-		matrices.pushPose();
-		matrices.translate(-camera.x, -camera.y, -camera.z);
-		VertexConsumer builder = BUFFER.getVertexBuilder(draw);
-		for (BoxState b : list) {
-			filledBox(matrices.last().pose(), builder, b);
-		}
-		matrices.popPose();
-
-		BUFFER.upload();
-		StagedVertexBuffer.ExecuteInfo info = BUFFER.getExecuteInfo(draw);
-		if (info != null) {
-			execute(Minecraft.getInstance(), info, pipeline);
-		}
-		BUFFER.endFrame();
-	}
-
-	private static void filledBox(Matrix4fc m, VertexConsumer v, BoxState b) {
-		float minX = b.x0(), minY = b.y0(), minZ = b.z0(), maxX = b.x1(), maxY = b.y1(), maxZ = b.z1();
-		float r = b.r(), g = b.g(), bl = b.b(), a = b.a();
-
-		// Front
-		v.addVertex(m, minX, minY, maxZ).setColor(r, g, bl, a);
-		v.addVertex(m, maxX, minY, maxZ).setColor(r, g, bl, a);
-		v.addVertex(m, maxX, maxY, maxZ).setColor(r, g, bl, a);
-		v.addVertex(m, minX, maxY, maxZ).setColor(r, g, bl, a);
-		// Back
-		v.addVertex(m, maxX, minY, minZ).setColor(r, g, bl, a);
-		v.addVertex(m, minX, minY, minZ).setColor(r, g, bl, a);
-		v.addVertex(m, minX, maxY, minZ).setColor(r, g, bl, a);
-		v.addVertex(m, maxX, maxY, minZ).setColor(r, g, bl, a);
-		// Left
-		v.addVertex(m, minX, minY, minZ).setColor(r, g, bl, a);
-		v.addVertex(m, minX, minY, maxZ).setColor(r, g, bl, a);
-		v.addVertex(m, minX, maxY, maxZ).setColor(r, g, bl, a);
-		v.addVertex(m, minX, maxY, minZ).setColor(r, g, bl, a);
-		// Right
-		v.addVertex(m, maxX, minY, maxZ).setColor(r, g, bl, a);
-		v.addVertex(m, maxX, minY, minZ).setColor(r, g, bl, a);
-		v.addVertex(m, maxX, maxY, minZ).setColor(r, g, bl, a);
-		v.addVertex(m, maxX, maxY, maxZ).setColor(r, g, bl, a);
-		// Top
-		v.addVertex(m, minX, maxY, maxZ).setColor(r, g, bl, a);
-		v.addVertex(m, maxX, maxY, maxZ).setColor(r, g, bl, a);
-		v.addVertex(m, maxX, maxY, minZ).setColor(r, g, bl, a);
-		v.addVertex(m, minX, maxY, minZ).setColor(r, g, bl, a);
-		// Bottom
-		v.addVertex(m, minX, minY, minZ).setColor(r, g, bl, a);
-		v.addVertex(m, maxX, minY, minZ).setColor(r, g, bl, a);
-		v.addVertex(m, maxX, minY, maxZ).setColor(r, g, bl, a);
-		v.addVertex(m, minX, minY, maxZ).setColor(r, g, bl, a);
-	}
-
-	private static void execute(Minecraft client, StagedVertexBuffer.ExecuteInfo info, RenderPipeline pipeline) {
-		GpuBufferSlice dynamicTransforms = RenderSystem.getDynamicUniforms()
-				.writeTransform(RenderSystem.getModelViewMatrixCopy(), COLOR_MODULATOR, MODEL_OFFSET, TEXTURE_MATRIX);
-
-		RenderTarget mainTarget = client.gameRenderer.mainRenderTarget();
-		GpuTextureView colorTexture = mainTarget.getColorTextureView();
-		assert colorTexture != null;
-
-		// 26.3: RenderPass is now an interface in renderpearl, and setPipeline takes a compiled pipeline.
-		// "var" avoids naming the pass type.
-		try (var pass = RenderSystem.getDevice().createCommandEncoder().createRenderPass(
-				() -> BaseFinderClient.MOD_ID + " highlights", colorTexture, Optional.empty(),
-				mainTarget.getDepthTextureView(), OptionalDouble.empty())) {
-			pass.setPipeline(RenderSystem.getCompiledPipeline(pipeline));
-			RenderSystem.bindDefaultUniforms(pass);
-			pass.setUniform("DynamicTransforms", dynamicTransforms);
-			pass.setVertexBuffer(0, info.vertexBuffer().slice());
-			// ExecuteInfo#indexBuffer was renamed customIndexBuffer in 26.3.
-			var customIndexBuffer = info.customIndexBuffer();
-			if (customIndexBuffer != null) {
-				pass.setIndexBuffer(customIndexBuffer, info.indexType());
-			}
-			pass.drawIndexed(info.indexCount(), 1, info.firstIndex(), info.baseVertex(), 0);
-		}
+	private static int argb(int rgb, int alpha) {
+		return (alpha << 24) | (rgb & 0xFFFFFF);
 	}
 }
