@@ -13,7 +13,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
-import org.lwjgl.glfw.GLFW;
 
 public class BaseFinderClient implements ClientModInitializer {
 	public static final String MOD_ID = "basefinder";
@@ -29,12 +28,14 @@ public class BaseFinderClient implements ClientModInitializer {
 		Store.load();
 
 		KeyMapping.Category category = KeyMapping.Category.register(Identifier.fromNamespaceAndPath(MOD_ID, "main"));
+		// 26.3 replaced GLFW with SDL: key constants come from InputConstants and the constructor
+		// takes (translation key, key, category).
 		toggleKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
-				"key.basefinder.toggle", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_B, category));
+				"key.basefinder.toggle", InputConstants.KEY_B, category));
 		configKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
-				"key.basefinder.config", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_N, category));
+				"key.basefinder.config", InputConstants.KEY_N, category));
 		resultsKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
-				"key.basefinder.results", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, category));
+				"key.basefinder.results", InputConstants.KEY_M, category));
 
 		// Block entities are reported as the client loads and unloads chunks: no polling, no world scans.
 		ClientBlockEntityEvents.BLOCK_ENTITY_LOAD.register((blockEntity, level) -> Tracker.onLoad(blockEntity));
